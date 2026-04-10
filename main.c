@@ -61,6 +61,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --enc-window-sec <secs>    Encoder attention window in seconds (1..8, default 8)\n");
     fprintf(stderr, "  --past-text <yes|no|auto>  Reuse previously decoded text as context for the next\n");
     fprintf(stderr, "                             segment/chunk (continuity bias; auto=yes for --stream)\n");
+    fprintf(stderr, "  --past-text-limit <n>      Max past-text tokens per segment/chunk (default: 512; 0=unlimited)\n");
+    fprintf(stderr, "                             Caps prefill length to keep speed bounded on long recordings\n");
     fprintf(stderr, "  --skip-silence              Drop long silent spans before inference (off by default)\n");
     fprintf(stderr, "  --prompt <text>            System prompt for biasing (example: \"Preserve spelling: CPU, CUDA, PostgreSQL, Redis\")\n");
     fprintf(stderr, "  --language <lang>          Force output language via token conditioning\n");
@@ -86,6 +88,7 @@ int main(int argc, char **argv) {
     const char *prompt_text = NULL;
     const char *force_language = NULL;
     int past_text_conditioning_mode = -1; /* -1 auto, 0 off, 1 on */
+    int past_text_token_limit = -1;       /* -1 = use default (512); 0 = unlimited */
     int skip_silence = 0;
     int emit_tokens = 1;
 
@@ -115,6 +118,12 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--past-text") == 0) {
             fprintf(stderr, "Error: --past-text requires an argument: yes|no|auto\n");
             return 1;
+        } else if (strcmp(argv[i], "--past-text-limit") == 0 && i + 1 < argc) {
+            past_text_token_limit = atoi(argv[++i]);
+            if (past_text_token_limit < 0) {
+                fprintf(stderr, "Error: --past-text-limit must be >= 0 (0 = unlimited)\n");
+                return 1;
+            }
         } else if (strcmp(argv[i], "--skip-silence") == 0) {
             skip_silence = 1;
         } else if (strcmp(argv[i], "--prompt") == 0 && i + 1 < argc) {
@@ -186,6 +195,8 @@ int main(int argc, char **argv) {
         /* Official streaming path uses prefix rollback by default.
          * Keep segmented mode default unchanged (off). */
         ctx->past_text_conditioning = 1;
+    if (past_text_token_limit >= 0)
+        ctx->past_text_token_limit = past_text_token_limit;
     if (skip_silence) ctx->skip_silence = 1;
     if (prompt_text && qwen_set_prompt(ctx, prompt_text) != 0) {
         fprintf(stderr, "Failed to set --prompt text\n");

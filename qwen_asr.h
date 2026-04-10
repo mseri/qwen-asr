@@ -223,6 +223,9 @@ typedef struct {
     int stream_max_new_tokens;     /* max generated tokens per streaming step (default 32) */
     int past_text_conditioning;    /* 1=enable past text conditioning in -S/--stream (default: off).
                                     * In segmented mode, this also enables boundary cleanup/post-processing. */
+    int past_text_token_limit;     /* max past-text tokens fed to each segment/chunk (default: 512).
+                                    * Caps the prefill to prevent quadratic slowdown on long recordings.
+                                    * 0 = unlimited (not recommended for long audio). */
     int skip_silence;              /* 1=drop long silent spans before transcription */
 
     /* Optional prompt/language controls */

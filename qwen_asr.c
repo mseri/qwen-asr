@@ -240,6 +240,7 @@ qwen_ctx_t *qwen_load(const char *model_dir) {
     ctx->stream_unfixed_chunks = 2;
     ctx->stream_max_new_tokens = 32;
     ctx->past_text_conditioning = 0;
+    ctx->past_text_token_limit = 512;
     ctx->skip_silence = 0;
 
     if (qwen_verbose >= 1) fprintf(stderr, "Model loaded.\n");
@@ -348,13 +349,6 @@ static const int PROMPT_SUFFIX_BASE[] = {
 #define PREFIX_HEAD_LEN 3
 #define PREFIX_TAIL_LEN 6
 #define SUFFIX_BASE_LEN 6
-
-/* Maximum number of past-text tokens fed as conditioning context to each
- * segment. Keeping this bounded prevents quadratic slowdown on long recordings:
- * prefill cost is O(n^2) in sequence length, so an unbounded past-text context
- * would make each successive segment slower than the last. 512 tokens is
- * roughly 1-2 minutes of dense speech — enough for boundary continuity. */
-#define PAST_TEXT_TOKEN_LIMIT 512
 
 /* Convert a single token embedding from bf16 to f32 */
 static void tok_embed_bf16_to_f32(float *dst, const uint16_t *tok_emb_bf16,
@@ -969,15 +963,14 @@ char *qwen_transcribe_audio(qwen_ctx_t *ctx, const float *samples, int n_samples
             past_tokens = qwen_tokenizer_encode(tokenizer, result, &n_past_tokens);
             if (!past_tokens) n_past_tokens = 0;
         }
-        /* Cap past context to avoid quadratic prefill growth on long recordings.
-         * Keep only the trailing PAST_TEXT_TOKEN_LIMIT tokens so the prefill
-         * sequence length stays bounded regardless of how much text has been
-         * accumulated so far. */
-        if (n_past_tokens > PAST_TEXT_TOKEN_LIMIT) {
-            int skip = n_past_tokens - PAST_TEXT_TOKEN_LIMIT;
+        /* Cap past context to keep prefill length bounded (avoids quadratic
+         * slowdown on long recordings). 0 = unlimited. */
+        if (ctx->past_text_token_limit > 0 &&
+                n_past_tokens > ctx->past_text_token_limit) {
+            int skip = n_past_tokens - ctx->past_text_token_limit;
             memmove(past_tokens, past_tokens + skip,
-                    (size_t)PAST_TEXT_TOKEN_LIMIT * sizeof(int));
-            n_past_tokens = PAST_TEXT_TOKEN_LIMIT;
+                    (size_t)ctx->past_text_token_limit * sizeof(int));
+            n_past_tokens = ctx->past_text_token_limit;
         }
 
         segment_emit_state_t emit_state = {0};
