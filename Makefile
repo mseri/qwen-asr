@@ -86,7 +86,7 @@ else
 endif
 
 test:
-	./asr_regression.py --binary ./qwen_asr --model-dir qwen3-asr-1.7b
+	./asr_regression.py --binary ./qwen_asr --model-dir qwen3-asr-0.6b
 
 # =============================================================================
 # Dependencies
