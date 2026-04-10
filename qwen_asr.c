@@ -895,8 +895,14 @@ char *qwen_transcribe_audio(qwen_ctx_t *ctx, const float *samples, int n_samples
         return text;
     }
 
-    /* Build split points */
-    int splits[128]; /* max 128 segments */
+    /* Build split points — size for exact segment count plus a small margin. */
+    int max_splits = audio_n_samples / (target_samples > 0 ? target_samples : 1) + 8;
+    int *splits = (int *)malloc((size_t)(max_splits + 1) * sizeof(int));
+    if (!splits) {
+        qwen_tokenizer_free(tokenizer);
+        free(compacted_samples);
+        return NULL;
+    }
     int n_splits = 0;
     splits[n_splits++] = 0;
 
@@ -906,7 +912,6 @@ char *qwen_transcribe_audio(qwen_ctx_t *ctx, const float *samples, int n_samples
                                      pos + target_samples, search);
         splits[n_splits++] = split;
         pos = split;
-        if (n_splits >= 127) break; /* safety */
     }
     splits[n_splits] = audio_n_samples; /* end sentinel */
 
@@ -1049,6 +1054,7 @@ char *qwen_transcribe_audio(qwen_ctx_t *ctx, const float *samples, int n_samples
     ctx->token_cb_userdata = saved_cb_userdata;
     qwen_tokenizer_free(tokenizer);
     free(compacted_samples);
+    free(splits);
     return result;
 }
 
