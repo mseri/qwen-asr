@@ -7,6 +7,9 @@
 #include "qwen_asr.h"
 #include "qwen_asr_audio.h"
 #include "qwen_asr_kernels.h"
+#ifdef USE_MPS
+#include "qwen_asr_kernels_metal.h"
+#endif
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -246,6 +249,9 @@ int main(int argc, char **argv) {
     } else {
         fprintf(stderr, "Transcription failed\n");
         qwen_free(ctx);
+#ifdef USE_MPS
+        qwen_metal_free();
+#endif
         return 1;
     }
 
@@ -268,5 +274,8 @@ int main(int argc, char **argv) {
     }
 
     qwen_free(ctx);
+#ifdef USE_MPS
+    qwen_metal_free();
+#endif
     return 0;
 }

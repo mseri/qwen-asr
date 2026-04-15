@@ -27,6 +27,10 @@
 #endif
 #endif
 
+#ifdef USE_MPS
+#include "qwen_asr_kernels_metal.h"
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -115,6 +119,9 @@ void qwen_set_threads(int n) {
 
     if (qwen_verbose >= 2)
         fprintf(stderr, "Thread pool: %d threads\n", n);
+#ifdef USE_MPS
+    qwen_metal_init();
+#endif
 }
 
 int qwen_get_num_cpus(void) {
@@ -177,6 +184,12 @@ void qwen_copy(float *dst, const float *src, int n) {
  * ======================================================================== */
 
 void qwen_matmul_t(float *C, const float *A, const float *B, int M, int K, int N) {
+#ifdef USE_MPS
+    if (qwen_metal_should_offload(M, K, N)) {
+        qwen_metal_gemm(C, A, B, M, K, N, /*transpose_b=*/1);
+        return;
+    }
+#endif
 #ifdef USE_BLAS
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                 M, N, K, 1.0f, A, K, B, K, 0.0f, C, N);
@@ -195,6 +208,17 @@ void qwen_matmul_t(float *C, const float *A, const float *B, int M, int K, int N
 
 void qwen_linear(float *y, const float *x, const float *W, const float *b,
                  int seq_len, int in_dim, int out_dim) {
+#ifdef USE_MPS
+    if (qwen_metal_should_offload(seq_len, in_dim, out_dim)) {
+        qwen_metal_gemm(y, x, W, seq_len, in_dim, out_dim, /*transpose_b=*/1);
+        if (b != NULL) {
+            for (int s = 0; s < seq_len; s++)
+                for (int o = 0; o < out_dim; o++)
+                    y[s * out_dim + o] += b[o];
+        }
+        return;
+    }
+#endif
 #ifdef USE_BLAS
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                 seq_len, out_dim, in_dim,
@@ -602,6 +626,11 @@ void qwen_conv2d(float *out, const float *in, const float *weight, const float *
     im2col(in, cols, c_in, h_in, w_in, kh, kw, stride, padding, h_out, w_out);
 
     /* GEMM: weight[c_out, patch_size] @ cols[patch_size, spatial_out] = out[c_out, spatial_out] */
+#ifdef USE_MPS
+    if (qwen_metal_should_offload(c_out, patch_size, spatial_out)) {
+        qwen_metal_gemm(out, weight, cols, c_out, patch_size, spatial_out, /*transpose_b=*/0);
+    } else {
+#endif
 #ifdef USE_BLAS
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 c_out, spatial_out, patch_size,
@@ -616,6 +645,9 @@ void qwen_conv2d(float *out, const float *in, const float *weight, const float *
             }
             out[oc * spatial_out + s] = sum;
         }
+    }
+#endif
+#ifdef USE_MPS
     }
 #endif
 

@@ -12,6 +12,12 @@ Usage examples:
   # Run regression checks against existing references
   ./asr_regression.py
 
+  # Run regression checks + benchmark (offline, 1 run)
+  ./asr_regression.py --bench
+
+  # Run only benchmark (3 runs, multiple modes)
+  ./asr_regression.py --bench-only --bench-runs 3 --bench-modes offline,segmented,stream
+
 The harness always prints two distances per sample:
   1) exact character-level distance (case/punctuation preserved)
   2) normalized character-level distance
@@ -22,11 +28,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 # ---- ANSI colors (auto-disabled when stdout is not a tty) ----
 
@@ -50,6 +58,46 @@ C_BWHITE  = _sgr("1;37")
 
 SEGMENTED_SECONDS = "20"
 STREAM_CACHE_DEFAULT_MODEL_DIR = "qwen3-asr-0.6b"
+BENCH_MODES = ("offline", "segmented", "stream")
+
+
+# ---- Inference timing -------------------------------------------------------
+
+@dataclass
+class InferenceTiming:
+    total_ms: float
+    n_tokens: int
+    tok_s: float
+    encoding_ms: float
+    decoding_ms: float
+    audio_s: float
+    infer_s: float
+    rtf: float
+
+
+def parse_timing(stderr: str) -> Optional[InferenceTiming]:
+    """Parse the two-line timing summary printed by qwen_asr to stderr."""
+    m1 = re.search(
+        r"Inference:\s*([\d.]+)\s*ms,\s*(\d+)\s*text tokens\s*"
+        r"\(([\d.]+)\s*tok/s,\s*encoding:\s*([\d.]+)ms,\s*decoding:\s*([\d.]+)ms\)",
+        stderr,
+    )
+    m2 = re.search(
+        r"Audio:\s*([\d.]+)\s*s processed in\s*([\d.]+)\s*s\s*\(([\d.]+)x realtime\)",
+        stderr,
+    )
+    if not m1 or not m2:
+        return None
+    return InferenceTiming(
+        total_ms=float(m1.group(1)),
+        n_tokens=int(m1.group(2)),
+        tok_s=float(m1.group(3)),
+        encoding_ms=float(m1.group(4)),
+        decoding_ms=float(m1.group(5)),
+        audio_s=float(m2.group(1)),
+        infer_s=float(m2.group(2)),
+        rtf=float(m2.group(3)),
+    )
 STREAM_CACHE_DEFAULT_SAMPLES = (
     "night_of_the_living_dead_1968/10s_back_down_the_road.wav",
     "night_of_the_living_dead_1968/45s_dont_be_afraid_of_me.wav",
@@ -635,9 +683,148 @@ def run_regression(
     return 0
 
 
+# =============================================================================
+# Benchmark
+# =============================================================================
+
+def run_bench_once(
+    binary: Path,
+    model_dir: Path,
+    wav: Path,
+    mode: str,
+    threads: int,
+    extra_args: Sequence[str],
+    timeout_s: int,
+) -> Tuple[Optional[InferenceTiming], float, int]:
+    """Run one benchmark pass; return (timing, wall_seconds, returncode)."""
+    cmd = [str(binary), "-d", str(model_dir), "-i", str(wav)]
+    if threads > 0:
+        cmd += ["-t", str(threads)]
+    if mode == "offline":
+        cmd += ["-S", "0"]
+    elif mode == "segmented":
+        cmd += ["-S", SEGMENTED_SECONDS]
+    elif mode == "stream":
+        cmd += ["--stream"]
+    cmd += list(extra_args)
+
+    t0 = time.monotonic()
+    try:
+        cp = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, time.monotonic() - t0, -1
+    wall = time.monotonic() - t0
+    if cp.returncode != 0:
+        return None, wall, cp.returncode
+    return parse_timing(cp.stderr), wall, cp.returncode
+
+
+def _bench_name(wav: Path, max_len: int = 28) -> str:
+    name = wav.name
+    return (name[: max_len - 3] + "...") if len(name) > max_len else name
+
+
+def run_benchmark(
+    wavs: List[Path],
+    binary: Path,
+    model_dir: Path,
+    modes: List[str],
+    n_runs: int,
+    threads: int,
+    extra_args: Sequence[str],
+    timeout_s: int,
+) -> int:
+    """Run benchmark across all wavs/modes and print a summary table."""
+    if not wavs:
+        print(f"{C_BYELLOW}[SKIP bench]{C_RESET} no wav files found")
+        return 0
+
+    threads_label = str(threads) if threads > 0 else "default"
+    runs_label = f"{n_runs} run{'s' if n_runs != 1 else ''}/sample"
+    modes_label = ",".join(modes)
+
+    sep = "─" * 84
+    print()
+    print(f"{C_BOLD}{sep}{C_RESET}")
+    print(
+        f"{C_BOLD}Benchmark{C_RESET}  "
+        f"model={model_dir.name}  threads={threads_label}  {runs_label}  modes={modes_label}"
+    )
+    print(f"{C_BOLD}{sep}{C_RESET}")
+    hdr = (
+        f"{'Sample':<28}  {'Mode':<10}  {'Dur(s)':>6}  {'RTF':>7}  "
+        f"{'Tok/s':>7}  {'Enc(ms)':>8}  {'Dec(ms)':>8}  {'Wall(s)':>8}"
+    )
+    print(f"{C_DIM}{hdr}{C_RESET}")
+    print(f"{C_DIM}{sep}{C_RESET}")
+
+    failures = 0
+    for wav in wavs:
+        for mode in modes:
+            timings: List[InferenceTiming] = []
+            walls: List[float] = []
+            error_rc: Optional[int] = None
+
+            for _ in range(n_runs):
+                timing, wall, rc = run_bench_once(
+                    binary=binary,
+                    model_dir=model_dir,
+                    wav=wav,
+                    mode=mode,
+                    threads=threads,
+                    extra_args=extra_args,
+                    timeout_s=timeout_s,
+                )
+                if rc != 0:
+                    error_rc = rc
+                    break
+                if timing:
+                    timings.append(timing)
+                    walls.append(wall)
+
+            if error_rc is not None:
+                failures += 1
+                rc_label = "timeout" if error_rc == -1 else f"rc={error_rc}"
+                print(
+                    f"{C_RED}[FAIL]{C_RESET} {_bench_name(wav):<27}  {mode:<10}  {rc_label}"
+                )
+                continue
+
+            if not timings:
+                print(
+                    f"{C_BYELLOW}[SKIP]{C_RESET} {_bench_name(wav):<27}  {mode:<10}  "
+                    f"no timing output"
+                )
+                continue
+
+            best_idx = walls.index(min(walls))
+            t = timings[best_idx]
+            wall_best = walls[best_idx]
+            runs_note = f"  ← best of {n_runs}" if n_runs > 1 else ""
+
+            print(
+                f"{_bench_name(wav):<28}  {mode:<10}  {t.audio_s:>6.1f}  "
+                f"{t.rtf:>6.2f}x  {t.tok_s:>7.1f}  {t.encoding_ms:>8.0f}  "
+                f"{t.decoding_ms:>8.0f}  {wall_best:>7.1f}s{runs_note}"
+            )
+
+    print(f"{C_DIM}{sep}{C_RESET}")
+    if failures:
+        print(f"{C_BRED}Benchmark: {failures} failure(s){C_RESET}")
+        return 1
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="qwen_asr regression suite (reference generation + quality checks)"
+        description="qwen_asr regression suite (reference generation + quality checks + benchmark)"
     )
     ap.add_argument(
         "--samples-root",
@@ -750,6 +937,37 @@ def parse_args() -> argparse.Namespace:
             "--past-text no output words on long sample (default: 0.80)"
         ),
     )
+    # ---- Benchmark -----------------------------------------------------------
+    ap.add_argument(
+        "--bench",
+        action="store_true",
+        help="Run benchmark after regression checks (1 run, offline mode)",
+    )
+    ap.add_argument(
+        "--bench-only",
+        action="store_true",
+        help="Run only the benchmark, skip regression checks",
+    )
+    ap.add_argument(
+        "--bench-runs",
+        type=int,
+        default=1,
+        help="Number of timed runs per benchmark configuration (default: 1)",
+    )
+    ap.add_argument(
+        "--bench-threads",
+        type=int,
+        default=0,
+        help="Threads for benchmark runs (default: 0 = let binary decide)",
+    )
+    ap.add_argument(
+        "--bench-modes",
+        default="offline",
+        help=(
+            "Comma-separated benchmark modes: offline,segmented,stream "
+            "(default: offline)"
+        ),
+    )
     return ap.parse_args()
 
 
@@ -771,6 +989,29 @@ def main() -> int:
     if args.stream_cache_enc_window_sec < 1.0 or args.stream_cache_enc_window_sec > 8.0:
         print("--stream-cache-enc-window-sec must be in [1, 8]", file=sys.stderr)
         return 2
+
+    # Validate benchmark args
+    run_bench = args.bench or args.bench_only
+    if args.bench_runs < 1:
+        print("--bench-runs must be >= 1", file=sys.stderr)
+        return 2
+    if args.bench_threads < 0:
+        print("--bench-threads must be >= 0", file=sys.stderr)
+        return 2
+    bench_modes: List[str] = []
+    if run_bench:
+        for m in args.bench_modes.split(","):
+            m = m.strip()
+            if m not in BENCH_MODES:
+                print(
+                    f"--bench-modes: unknown mode '{m}'; valid: {','.join(BENCH_MODES)}",
+                    file=sys.stderr,
+                )
+                return 2
+            bench_modes.append(m)
+        if not bench_modes:
+            print("--bench-modes must not be empty", file=sys.stderr)
+            return 2
 
     all_wavs = find_wavs(samples_root)
     if not all_wavs:
@@ -816,7 +1057,7 @@ def main() -> int:
                         not args.segment_check_only and
                         not args.stream_check_only)
 
-    need_primary_model = should_generate or run_segment or run_stream or (not any_focused_only)
+    need_primary_model = should_generate or run_segment or run_stream or (not any_focused_only) or run_bench
     model_dir = Path(args.model_dir).resolve()
     if need_primary_model and not model_dir.exists():
         print(f"missing model dir: {model_dir}", file=sys.stderr)
@@ -838,6 +1079,19 @@ def main() -> int:
             show_output=show_output,
         )
         print(f"{C_BGREEN}Reference generation completed: wrote {generated} .txt files{C_RESET}")
+
+    # --bench-only: skip all regression checks and go straight to benchmark
+    if args.bench_only:
+        return run_benchmark(
+            wavs=all_wavs,
+            binary=binary,
+            model_dir=model_dir,
+            modes=bench_modes,
+            n_runs=args.bench_runs,
+            threads=args.bench_threads,
+            extra_args=args.arg,
+            timeout_s=args.timeout_s,
+        )
 
     failures = 0
     if run_segment:
@@ -898,6 +1152,21 @@ def main() -> int:
     if failures:
         print(f"\n{C_BRED}Overall result FAILED due to focused regression check failure{C_RESET}")
         return 1
+
+    if run_bench:
+        bench_rc = run_benchmark(
+            wavs=all_wavs,
+            binary=binary,
+            model_dir=model_dir,
+            modes=bench_modes,
+            n_runs=args.bench_runs,
+            threads=args.bench_threads,
+            extra_args=args.arg,
+            timeout_s=args.timeout_s,
+        )
+        if bench_rc != 0:
+            return bench_rc
+
     return rc
 
 

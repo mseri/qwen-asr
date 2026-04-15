@@ -13,11 +13,12 @@ SRCS = qwen_asr.c qwen_asr_kernels.c qwen_asr_kernels_generic.c qwen_asr_kernels
 OBJS = $(SRCS:.c=.o)
 MAIN = main.c
 TARGET = qwen_asr
+EXTRA_OBJS =
 
 # Debug build flags
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug info help blas test test-stream-cache
+.PHONY: all clean debug info help blas mps test bench test-stream-cache
 
 # Default: show available targets
 all: help
@@ -27,15 +28,17 @@ help:
 	@echo ""
 	@echo "Choose a backend:"
 	@echo "  make blas     - With BLAS acceleration (Accelerate/OpenBLAS)"
+	@echo "  make mps      - Apple Silicon (fastest, macOS only)"
 	@echo ""
 	@echo "Other targets:"
 	@echo "  make debug    - Debug build with AddressSanitizer"
-	@echo "  make test     - Run regression suite (requires ./qwen_asr and model files)"
+	@echo "  make test     - Run regression suite + quick benchmark (requires ./qwen_asr and model files)"
+	@echo "  make bench    - Run benchmark only (3 runs, all modes)"
 	@echo "  make test-stream-cache - Run stream cache on/off equivalence check"
 	@echo "  make clean    - Remove build artifacts"
 	@echo "  make info     - Show build configuration"
 	@echo ""
-	@echo "Example: make blas && ./qwen_asr -d model_dir -i audio.wav"
+	@echo "Example: make mps && ./qwen_asr -d model_dir -i audio.wav"
 
 # =============================================================================
 # Backend: blas (Accelerate on macOS, OpenBLAS on Linux)
@@ -54,13 +57,36 @@ blas:
 	@echo "Built with BLAS backend"
 
 # =============================================================================
+# Backend: mps (Metal Performance Shaders — Apple Silicon only)
+# =============================================================================
+ifeq ($(UNAME_S),Darwin)
+mps: CC = clang
+mps: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DUSE_MPS -DACCELERATE_NEW_LAPACK
+mps: LDFLAGS += -framework Accelerate -framework Metal -framework MetalPerformanceShaders -framework Foundation -lobjc
+mps: EXTRA_OBJS = qwen_asr_kernels_metal.o
+mps:
+	@$(MAKE) clean
+	@$(MAKE) $(TARGET) CC=clang CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" EXTRA_OBJS="$(EXTRA_OBJS)"
+	@echo ""
+	@echo "Built with Metal/MPS backend (Apple Silicon)"
+else
+mps:
+	@echo "Error: 'make mps' is only supported on macOS (Darwin)" >&2
+	@exit 1
+endif
+
+# =============================================================================
 # Build rules
 # =============================================================================
-$(TARGET): $(OBJS) main.o
+$(TARGET): $(OBJS) main.o $(EXTRA_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 %.o: %.c qwen_asr.h qwen_asr_kernels.h
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Objective-C compilation rule (for Metal backend)
+%.o: %.m qwen_asr_kernels_metal.h
+	clang $(CFLAGS) -c -o $@ $<
 
 # Debug build
 debug: CFLAGS = $(DEBUG_CFLAGS)
@@ -73,20 +99,24 @@ debug:
 # Utilities
 # =============================================================================
 clean:
-	rm -f $(OBJS) main.o $(TARGET)
+	rm -f $(OBJS) main.o qwen_asr_kernels_metal.o $(TARGET)
 
 info:
 	@echo "Platform: $(UNAME_S)"
 	@echo "Compiler: $(CC)"
 	@echo ""
 ifeq ($(UNAME_S),Darwin)
-	@echo "Backend: blas (Apple Accelerate)"
+	@echo "Backends available: blas (Apple Accelerate), mps (Metal/MPS)"
 else
 	@echo "Backend: blas (OpenBLAS)"
 endif
 
 test:
-	./asr_regression.py --binary ./qwen_asr --model-dir qwen3-asr-0.6b
+	./asr_regression.py --binary ./qwen_asr --model-dir qwen3-asr-0.6b --bench
+
+bench:
+	./asr_regression.py --binary ./qwen_asr --model-dir qwen3-asr-0.6b \
+		--bench-only --bench-runs 3 --bench-modes offline,segmented,stream
 
 # =============================================================================
 # Dependencies
@@ -101,4 +131,5 @@ qwen_asr_encoder.o: qwen_asr_encoder.c qwen_asr.h qwen_asr_kernels.h qwen_asr_sa
 qwen_asr_decoder.o: qwen_asr_decoder.c qwen_asr.h qwen_asr_kernels.h qwen_asr_safetensors.h
 qwen_asr_tokenizer.o: qwen_asr_tokenizer.c qwen_asr_tokenizer.h
 qwen_asr_safetensors.o: qwen_asr_safetensors.c qwen_asr_safetensors.h
+qwen_asr_kernels_metal.o: qwen_asr_kernels_metal.m qwen_asr_kernels_metal.h
 main.o: main.c qwen_asr.h qwen_asr_kernels.h

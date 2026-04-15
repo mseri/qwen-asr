@@ -2,7 +2,7 @@
 
 This is a C implementation of the inference pipeline for [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) speech-to-text models (both 0.6B and 1.7B). It has zero external dependencies beyond the C standard library and a BLAS implementation (Accelerate on macOS, OpenBLAS on Linux). Tokens stream to stdout as they are generated. The implementation runs at speed multiple of the file length even in very modest hardware, like low end Intel or AMD processor.
 
-**Important**: this implementation explicitly **avoids implementing support for MPS**. Transcription systems are very important pieces of infrastructure, and are often run on remote Linux servers. Adding the MPS target would focus the efforts too much on Apple hardware, so for now I'm skipping it. The code runs very well anyway on Apple hardware (NEON optimized). Please, **don't send pull requests** about this feature, fork the code instead, in order to add MPS support. I'll add it much later when the other optimizations are already mature.
+On Apple Silicon, `make mps` enables a Metal/MPS backend that offloads large matrix multiplications to the GPU via `MPSMatrixMultiplication`. Since Apple Silicon uses unified memory, there is no CPU↔GPU copy overhead, which makes this path meaningfully faster than CPU-only BLAS for encoder-heavy workloads.
 
 ## Supported modes and models
 
@@ -17,8 +17,11 @@ Both the 0.6B and 1.7B parameters models are supported. While the 1.7B model is 
 ## Quick Start
 
 ```bash
-# Build
+# Build (CPU — any platform)
 make blas
+
+# Build (Apple Silicon GPU — fastest on macOS)
+make mps
 
 # Download a model (interactive selector: small=0.6B, large=1.7B)
 ./download_model.sh
@@ -36,7 +39,7 @@ ffmpeg -i audio.mp3 -f s16le -ar 16000 -ac 1 - 2>/dev/null | \
 
 ## Features
 
-- **Almost zero dependencies**: Pure C implementation. Only needs BLAS (Accelerate on macOS, OpenBLAS on Linux).
+- **Almost zero dependencies**: Pure C implementation. Only needs BLAS (Accelerate on macOS, OpenBLAS on Linux). The optional Metal/MPS backend (`make mps`) additionally requires the Metal and MetalPerformanceShaders frameworks (included with macOS).
 - **Both models**: Automatically detects Qwen3-ASR-0.6B or 1.7B from the weight files.
 - **Streaming output**: Tokens are printed to stdout as they are generated, word by word, even in offline mode (no `--stream`).
 - **Streaming mode**: `--stream` processes audio in chunks with prefix rollback. A sliding window bounds encoder and decoder context for indefinite streaming.
