@@ -265,6 +265,70 @@ void qwen_bf16_matvec_fused_avx(float *y, const float *x, const uint16_t *W_bf16
                                  const float *bias, int in_dim, int out_dim) {
     int o = 0;
 
+    for (; o + 3 < out_dim; o += 4) {
+        const uint16_t *w0 = W_bf16 + (size_t)(o + 0) * in_dim;
+        const uint16_t *w1 = W_bf16 + (size_t)(o + 1) * in_dim;
+        const uint16_t *w2 = W_bf16 + (size_t)(o + 2) * in_dim;
+        const uint16_t *w3 = W_bf16 + (size_t)(o + 3) * in_dim;
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+        __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+        __m256 a4 = _mm256_setzero_ps(), a5 = _mm256_setzero_ps();
+        __m256 a6 = _mm256_setzero_ps(), a7 = _mm256_setzero_ps();
+        int k = 0;
+        for (; k + 16 <= in_dim; k += 16) {
+            __m256 xlo = _mm256_loadu_ps(x + k);
+            __m256 xhi = _mm256_loadu_ps(x + k + 8);
+            __m256 wlo, whi;
+            bf16x16_to_f32(w0 + k, &wlo, &whi);
+            a0 = _mm256_fmadd_ps(wlo, xlo, a0);
+            a1 = _mm256_fmadd_ps(whi, xhi, a1);
+            bf16x16_to_f32(w1 + k, &wlo, &whi);
+            a2 = _mm256_fmadd_ps(wlo, xlo, a2);
+            a3 = _mm256_fmadd_ps(whi, xhi, a3);
+            bf16x16_to_f32(w2 + k, &wlo, &whi);
+            a4 = _mm256_fmadd_ps(wlo, xlo, a4);
+            a5 = _mm256_fmadd_ps(whi, xhi, a5);
+            bf16x16_to_f32(w3 + k, &wlo, &whi);
+            a6 = _mm256_fmadd_ps(wlo, xlo, a6);
+            a7 = _mm256_fmadd_ps(whi, xhi, a7);
+        }
+        a0 = _mm256_add_ps(a0, a1);
+        a2 = _mm256_add_ps(a2, a3);
+        a4 = _mm256_add_ps(a4, a5);
+        a6 = _mm256_add_ps(a6, a7);
+        __m128 s0 = _mm_add_ps(_mm256_castps256_ps128(a0), _mm256_extractf128_ps(a0, 1));
+        __m128 s1 = _mm_add_ps(_mm256_castps256_ps128(a2), _mm256_extractf128_ps(a2, 1));
+        __m128 s2 = _mm_add_ps(_mm256_castps256_ps128(a4), _mm256_extractf128_ps(a4, 1));
+        __m128 s3 = _mm_add_ps(_mm256_castps256_ps128(a6), _mm256_extractf128_ps(a6, 1));
+        __m128 h01 = _mm_hadd_ps(s0, s1);
+        __m128 h23 = _mm_hadd_ps(s2, s3);
+        __m128 sums = _mm_hadd_ps(h01, h23);
+        float r0 = _mm_cvtss_f32(sums) + (bias ? bias[o + 0] : 0.0f);
+        float r1 = _mm_cvtss_f32(_mm_shuffle_ps(sums, sums, 0x55)) + (bias ? bias[o + 1] : 0.0f);
+        float r2 = _mm_cvtss_f32(_mm_shuffle_ps(sums, sums, 0xAA)) + (bias ? bias[o + 2] : 0.0f);
+        float r3 = _mm_cvtss_f32(_mm_shuffle_ps(sums, sums, 0xFF)) + (bias ? bias[o + 3] : 0.0f);
+        for (; k < in_dim; k++) {
+            float xk = x[k];
+            uint32_t b0 = ((uint32_t)w0[k]) << 16;
+            uint32_t b1 = ((uint32_t)w1[k]) << 16;
+            uint32_t b2 = ((uint32_t)w2[k]) << 16;
+            uint32_t b3 = ((uint32_t)w3[k]) << 16;
+            float v0, v1, v2, v3;
+            memcpy(&v0, &b0, 4);
+            memcpy(&v1, &b1, 4);
+            memcpy(&v2, &b2, 4);
+            memcpy(&v3, &b3, 4);
+            r0 += v0 * xk;
+            r1 += v1 * xk;
+            r2 += v2 * xk;
+            r3 += v3 * xk;
+        }
+        y[o + 0] = r0;
+        y[o + 1] = r1;
+        y[o + 2] = r2;
+        y[o + 3] = r3;
+    }
+
     for (; o + 1 < out_dim; o += 2) {
         const uint16_t *w0 = W_bf16 + (size_t)o * in_dim;
         const uint16_t *w1 = w0 + in_dim;
@@ -348,6 +412,79 @@ void qwen_argmax_bf16_range_avx(const float *x, const uint16_t *W_bf16,
 }
 
 #endif /* AVX-512F+BW vs AVX2 for bf16 */
+
+static inline __m256 bf16x8_to_f32_any(__m128i raw) {
+    return _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(raw), 16));
+}
+
+static inline void bf16x16_to_f32_any(const uint16_t *src, __m256 *lo, __m256 *hi) {
+    __m256i raw = _mm256_loadu_si256((const __m256i *)src);
+    *lo = bf16x8_to_f32_any(_mm256_castsi256_si128(raw));
+    *hi = bf16x8_to_f32_any(_mm256_extracti128_si256(raw, 1));
+}
+
+static inline float hsum256_f32(__m256 v) {
+    __m128 r = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
+    r = _mm_hadd_ps(r, r);
+    r = _mm_hadd_ps(r, r);
+    return _mm_cvtss_f32(r);
+}
+
+void qwen_bf16_qkv_fused_matvec_avx(float *q, float *k, float *v, const float *x,
+                                    const uint16_t *Wqkv_bf16, int in_dim, int kv_dim) {
+    for (int g = 0; g < kv_dim; g++) {
+        const uint16_t *w0 = Wqkv_bf16 + (size_t)(4 * g + 0) * in_dim;
+        const uint16_t *w1 = Wqkv_bf16 + (size_t)(4 * g + 1) * in_dim;
+        const uint16_t *w2 = Wqkv_bf16 + (size_t)(4 * g + 2) * in_dim;
+        const uint16_t *w3 = Wqkv_bf16 + (size_t)(4 * g + 3) * in_dim;
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+        __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+        __m256 a4 = _mm256_setzero_ps(), a5 = _mm256_setzero_ps();
+        __m256 a6 = _mm256_setzero_ps(), a7 = _mm256_setzero_ps();
+        int i = 0;
+        for (; i + 16 <= in_dim; i += 16) {
+            __m256 xlo = _mm256_loadu_ps(x + i);
+            __m256 xhi = _mm256_loadu_ps(x + i + 8);
+            __m256 wlo, whi;
+            bf16x16_to_f32_any(w0 + i, &wlo, &whi);
+            a0 = _mm256_fmadd_ps(wlo, xlo, a0);
+            a1 = _mm256_fmadd_ps(whi, xhi, a1);
+            bf16x16_to_f32_any(w1 + i, &wlo, &whi);
+            a2 = _mm256_fmadd_ps(wlo, xlo, a2);
+            a3 = _mm256_fmadd_ps(whi, xhi, a3);
+            bf16x16_to_f32_any(w2 + i, &wlo, &whi);
+            a4 = _mm256_fmadd_ps(wlo, xlo, a4);
+            a5 = _mm256_fmadd_ps(whi, xhi, a5);
+            bf16x16_to_f32_any(w3 + i, &wlo, &whi);
+            a6 = _mm256_fmadd_ps(wlo, xlo, a6);
+            a7 = _mm256_fmadd_ps(whi, xhi, a7);
+        }
+        float s0 = hsum256_f32(_mm256_add_ps(a0, a1));
+        float s1 = hsum256_f32(_mm256_add_ps(a2, a3));
+        float s2 = hsum256_f32(_mm256_add_ps(a4, a5));
+        float s3 = hsum256_f32(_mm256_add_ps(a6, a7));
+        for (; i < in_dim; i++) {
+            float xi = x[i];
+            uint32_t b0 = ((uint32_t)w0[i]) << 16;
+            uint32_t b1 = ((uint32_t)w1[i]) << 16;
+            uint32_t b2 = ((uint32_t)w2[i]) << 16;
+            uint32_t b3 = ((uint32_t)w3[i]) << 16;
+            float f0, f1, f2, f3;
+            memcpy(&f0, &b0, 4);
+            memcpy(&f1, &b1, 4);
+            memcpy(&f2, &b2, 4);
+            memcpy(&f3, &b3, 4);
+            s0 += f0 * xi;
+            s1 += f1 * xi;
+            s2 += f2 * xi;
+            s3 += f3 * xi;
+        }
+        q[2 * g + 0] = s0;
+        q[2 * g + 1] = s1;
+        k[g] = s2;
+        v[g] = s3;
+    }
+}
 
 /* =====================================================================
  * f32 attention helpers - AVX2+FMA, with AVX-512F when available

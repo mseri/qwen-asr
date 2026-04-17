@@ -98,11 +98,41 @@ int qwen_decoder_load(qwen_decoder_t *dec, multi_safetensors_t *ms,
             int hidden = cfg->dec_hidden;
             size_t row_bytes = (size_t)hidden * sizeof(uint16_t);
             l->gate_up_fused_bf16 = (uint16_t *)malloc(2 * (size_t)inter * row_bytes);
+            if (!l->gate_up_fused_bf16) {
+                fprintf(stderr, "decoder: failed to allocate fused gate/up for layer %d\n", i);
+                return -1;
+            }
             for (int r = 0; r < inter; r++) {
                 memcpy(l->gate_up_fused_bf16 + (size_t)(2 * r) * hidden,
                        l->gate_weight_bf16 + (size_t)r * hidden, row_bytes);
                 memcpy(l->gate_up_fused_bf16 + (size_t)(2 * r + 1) * hidden,
                        l->up_weight_bf16 + (size_t)r * hidden, row_bytes);
+            }
+        }
+
+        /* Fuse decode-only QKV rows so single-token decode can reuse x loads. */
+        {
+            int q_dim = cfg->dec_heads * cfg->dec_head_dim;
+            int kv_dim = cfg->dec_kv_heads * cfg->dec_head_dim;
+            int hidden = cfg->dec_hidden;
+            size_t row_bytes = (size_t)hidden * sizeof(uint16_t);
+            l->qkv_fused_bf16 = NULL;
+            if (q_dim == 2 * kv_dim) {
+                l->qkv_fused_bf16 = (uint16_t *)malloc(4 * (size_t)kv_dim * row_bytes);
+                if (!l->qkv_fused_bf16) {
+                    fprintf(stderr, "decoder: failed to allocate fused QKV for layer %d\n", i);
+                    return -1;
+                }
+                for (int r = 0; r < kv_dim; r++) {
+                    memcpy(l->qkv_fused_bf16 + (size_t)(4 * r + 0) * hidden,
+                           l->wq_weight_bf16 + (size_t)(2 * r + 0) * hidden, row_bytes);
+                    memcpy(l->qkv_fused_bf16 + (size_t)(4 * r + 1) * hidden,
+                           l->wq_weight_bf16 + (size_t)(2 * r + 1) * hidden, row_bytes);
+                    memcpy(l->qkv_fused_bf16 + (size_t)(4 * r + 2) * hidden,
+                           l->wk_weight_bf16 + (size_t)r * hidden, row_bytes);
+                    memcpy(l->qkv_fused_bf16 + (size_t)(4 * r + 3) * hidden,
+                           l->wv_weight_bf16 + (size_t)r * hidden, row_bytes);
+                }
             }
         }
 
@@ -429,11 +459,17 @@ int qwen_decoder_forward(qwen_ctx_t *ctx, const float *input_embed) {
         qwen_dec_layer_t *l = &dec->layers[layer];
 
         qwen_rms_norm(x_norm, x, l->input_norm, 1, dim, eps);
-        qwen_linear_nobias_bf16_qkv(q, k, v, x_norm,
-                                    l->wq_weight_bf16,
-                                    l->wk_weight_bf16,
-                                    l->wv_weight_bf16,
-                                    dim, q_dim, kv_dim);
+        if (l->qkv_fused_bf16) {
+            qwen_linear_nobias_bf16_qkv_fused(q, k, v, x_norm,
+                                              l->qkv_fused_bf16,
+                                              dim, kv_dim);
+        } else {
+            qwen_linear_nobias_bf16_qkv(q, k, v, x_norm,
+                                        l->wq_weight_bf16,
+                                        l->wk_weight_bf16,
+                                        l->wv_weight_bf16,
+                                        dim, q_dim, kv_dim);
+        }
 
         /* Per-head Q/K RMSNorm */
         qwen_rms_norm_per_head(q, l->q_norm_weight, 1, n_heads, head_dim, eps);

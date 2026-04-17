@@ -284,6 +284,7 @@ void qwen_free(qwen_ctx_t *ctx) {
         FREE0(l->q_norm_weight); FREE0(l->k_norm_weight);
         FREE0(l->input_norm); FREE0(l->post_attn_norm);
         FREE0(l->gate_up_fused_bf16);
+        FREE0(l->qkv_fused_bf16);
     }
     FREE0(ctx->decoder.norm);
 

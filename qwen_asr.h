@@ -150,6 +150,9 @@ typedef struct {
 
     /* Fused gate+up weight for single-token matvec [2*intermediate, hidden] */
     uint16_t *gate_up_fused_bf16;
+
+    /* Fused decode-only QKV weight [q0,q1,k0,v0,q2,q3,k1,v1,...] */
+    uint16_t *qkv_fused_bf16;
 } qwen_dec_layer_t;
 
 typedef struct {

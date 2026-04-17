@@ -48,6 +48,11 @@ void qwen_linear_nobias_bf16_qkv(float *q, float *k, float *v, const float *x,
                                  const uint16_t *Wv_bf16,
                                  int in_dim, int q_dim, int kv_dim);
 
+/* Decode-only fast path for fused rows [q0,q1,k0,v0,q2,q3,k1,v1,...]. */
+void qwen_linear_nobias_bf16_qkv_fused(float *q, float *k, float *v, const float *x,
+                                       const uint16_t *Wqkv_bf16,
+                                       int in_dim, int kv_dim);
+
 void qwen_matmul_t_bf16(float *C, const float *A, const uint16_t *B_bf16,
                          int M, int K, int N);
 

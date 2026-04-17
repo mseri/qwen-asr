@@ -483,6 +483,52 @@ void qwen_linear_nobias_bf16_qkv(float *q, float *k, float *v, const float *x,
     parallel_for(qkv_matvec_worker, &task);
 }
 
+typedef struct {
+    float *q;
+    float *k;
+    float *v;
+    const float *x;
+    const uint16_t *Wqkv_bf16;
+    int in_dim;
+    int kv_dim;
+} qkv_fused_task_t;
+
+static void qkv_fused_worker(int tid, int n_threads, void *arg) {
+    qkv_fused_task_t *t = (qkv_fused_task_t *)arg;
+    int chunk = (t->kv_dim + n_threads - 1) / n_threads;
+    int start = tid * chunk;
+    int end = start + chunk;
+    if (end > t->kv_dim) end = t->kv_dim;
+    if (start >= end) return;
+
+    qwen_bf16_qkv_fused_matvec_impl(t->q + 2 * start,
+                                    t->k + start,
+                                    t->v + start,
+                                    t->x,
+                                    t->Wqkv_bf16 + (size_t)(4 * start) * t->in_dim,
+                                    t->in_dim,
+                                    end - start);
+}
+
+void qwen_linear_nobias_bf16_qkv_fused(float *q, float *k, float *v, const float *x,
+                                       const uint16_t *Wqkv_bf16, int in_dim, int kv_dim) {
+    if (tp.n_threads <= 1) {
+        qwen_bf16_qkv_fused_matvec_impl(q, k, v, x, Wqkv_bf16, in_dim, kv_dim);
+        return;
+    }
+
+    qkv_fused_task_t task = {
+        .q = q,
+        .k = k,
+        .v = v,
+        .x = x,
+        .Wqkv_bf16 = Wqkv_bf16,
+        .in_dim = in_dim,
+        .kv_dim = kv_dim,
+    };
+    parallel_for(qkv_fused_worker, &task);
+}
+
 void qwen_linear_nobias_bf16(float *y, const float *x, const uint16_t *W_bf16,
                               int seq_len, int in_dim, int out_dim) {
     if (seq_len == 1) {
