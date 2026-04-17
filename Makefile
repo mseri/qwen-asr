@@ -59,7 +59,14 @@ blas:
 # =============================================================================
 # Backend: mps (Metal Performance Shaders — Apple Silicon only)
 # =============================================================================
+UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_S),Darwin)
+ifneq ($(UNAME_M),arm64)
+mps:
+	@echo "Error: 'make mps' requires Apple Silicon (arm64). This machine is $(UNAME_M)." >&2
+	@echo "Use 'make blas' instead (Apple Accelerate with AVX2)." >&2
+	@exit 1
+else
 mps: CC = clang
 mps: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DUSE_MPS -DACCELERATE_NEW_LAPACK
 mps: LDFLAGS += -framework Accelerate -framework Metal -framework MetalPerformanceShaders -framework Foundation -lobjc
@@ -69,9 +76,10 @@ mps:
 	@$(MAKE) $(TARGET) CC=clang CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" EXTRA_OBJS="$(EXTRA_OBJS)"
 	@echo ""
 	@echo "Built with Metal/MPS backend (Apple Silicon)"
+endif
 else
 mps:
-	@echo "Error: 'make mps' is only supported on macOS (Darwin)" >&2
+	@echo "Error: 'make mps' is only supported on macOS with Apple Silicon" >&2
 	@exit 1
 endif
 
