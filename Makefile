@@ -73,6 +73,15 @@ mps: LDFLAGS += -framework Accelerate -framework Metal -framework MetalPerforman
 mps: EXTRA_OBJS = qwen_asr_kernels_metal.o
 mps:
 	@$(MAKE) clean
+	@echo "Compiling Metal shaders..."
+	@if xcrun -sdk macosx metal -c -o qwen_asr_kernels.air qwen_asr_kernels.metal 2>/dev/null && \
+	    xcrun -sdk macosx metallib -o qwen_asr_kernels.metallib qwen_asr_kernels.air 2>/dev/null; then \
+		rm -f qwen_asr_kernels.air; \
+		echo "  → qwen_asr_kernels.metallib compiled"; \
+	else \
+		rm -f qwen_asr_kernels.air qwen_asr_kernels.metallib; \
+		echo "  → Metal toolchain not available; will compile shaders at runtime from .metal source"; \
+	fi
 	@$(MAKE) $(TARGET) CC=clang CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" EXTRA_OBJS="$(EXTRA_OBJS)"
 	@echo ""
 	@echo "Built with Metal/MPS backend (Apple Silicon)"
@@ -107,7 +116,7 @@ debug:
 # Utilities
 # =============================================================================
 clean:
-	rm -f $(OBJS) main.o qwen_asr_kernels_metal.o $(TARGET)
+	rm -f $(OBJS) main.o qwen_asr_kernels_metal.o qwen_asr_kernels.metallib qwen_asr_kernels.air $(TARGET)
 
 info:
 	@echo "Platform: $(UNAME_S)"

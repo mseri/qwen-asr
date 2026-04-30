@@ -671,6 +671,13 @@ void qwen_conv2d(float *out, const float *in, const float *weight, const float *
 
 void qwen_layer_norm(float *out, const float *x, const float *weight, const float *bias,
                      int seq_len, int hidden, float eps) {
+#ifdef USE_MPS
+    if (qwen_metal_experimental_enabled() &&
+        qwen_metal_has_layer_norm() && seq_len >= 2) {
+        qwen_metal_layer_norm(out, x, weight, bias, seq_len, hidden, eps);
+        return;
+    }
+#endif
     for (int s = 0; s < seq_len; s++) {
         const float *x_row = x + s * hidden;
         float *out_row = out + s * hidden;
@@ -781,6 +788,13 @@ void qwen_layer_norm(float *out, const float *x, const float *weight, const floa
 
 void qwen_rms_norm(float *out, const float *x, const float *weight,
                    int seq_len, int hidden, float eps) {
+#ifdef USE_MPS
+    if (qwen_metal_experimental_enabled() &&
+        qwen_metal_has_rms_norm() && seq_len >= 2) {
+        qwen_metal_rms_norm(out, x, weight, seq_len, hidden, eps);
+        return;
+    }
+#endif
     for (int s = 0; s < seq_len; s++) {
         const float *x_row = x + s * hidden;
         float *out_row = out + s * hidden;
@@ -842,6 +856,13 @@ void qwen_rms_norm(float *out, const float *x, const float *weight,
 
 void qwen_rms_norm_per_head(float *x, const float *weight,
                              int seq_len, int n_heads, int head_dim, float eps) {
+#ifdef USE_MPS
+    if (qwen_metal_experimental_enabled() &&
+        qwen_metal_has_rms_norm_per_head() && seq_len >= 2) {
+        qwen_metal_rms_norm_per_head(x, weight, seq_len, n_heads, head_dim, eps);
+        return;
+    }
+#endif
     /* x is [seq, n_heads * head_dim] - normalize each [head_dim] segment */
     int hidden = n_heads * head_dim;
     for (int s = 0; s < seq_len; s++) {
@@ -916,6 +937,12 @@ void qwen_silu(float *x, int n) {
 }
 
 void qwen_gelu(float *x, int n) {
+#ifdef USE_MPS
+    if (qwen_metal_has_gelu() && n >= 1024) {
+        qwen_metal_gelu(x, n);
+        return;
+    }
+#endif
     for (int i = 0; i < n; i++) {
         float val = x[i];
         float x3 = val * val * val;
@@ -976,6 +1003,13 @@ static void swiglu_worker(int tid, int n_threads, void *arg) {
 }
 
 void qwen_swiglu_multiply(float *out, const float *gate_up, int seq_len, int intermediate) {
+#ifdef USE_MPS
+    if (qwen_metal_experimental_enabled() &&
+        qwen_metal_has_swiglu() && seq_len >= 2 && intermediate >= 256) {
+        qwen_metal_swiglu(out, gate_up, seq_len, intermediate);
+        return;
+    }
+#endif
     swiglu_task_t task = {
         .out = out,
         .gate_up = gate_up,
@@ -1036,6 +1070,14 @@ void qwen_bidirectional_attention(float *out, const float *Q, const float *K,
                                    const float *V, int seq __attribute__((unused)),
                                    int n_heads, int head_dim, float scale,
                                    const int *window_starts, int n_windows) {
+#ifdef USE_MPS
+    if (qwen_metal_experimental_enabled() &&
+        qwen_metal_has_bidir_attn() && seq >= 2) {
+        qwen_metal_bidirectional_attention(out, Q, K, V, seq, n_heads, head_dim,
+                                           scale, window_starts, n_windows);
+        return;
+    }
+#endif
     int hidden = n_heads * head_dim;
 
     for (int h = 0; h < n_heads; h++) {
@@ -1156,6 +1198,14 @@ static void causal_attn_worker(int tid, int n_threads, void *arg) {
 void qwen_causal_attention(float *out, const float *Q, const float *K, const float *V,
                             int seq_q, int seq_k, int n_heads, int n_kv_heads,
                             int head_dim, float scale, int q_offset) {
+#ifdef USE_MPS
+    if (qwen_metal_experimental_enabled() &&
+        qwen_metal_has_causal_attn() && seq_q >= 2) {
+        qwen_metal_causal_attention(out, Q, K, V, seq_q, seq_k, n_heads,
+                                     n_kv_heads, head_dim, scale, q_offset);
+        return;
+    }
+#endif
     if (tp.n_threads > 1 && n_heads >= 2 && (seq_q >= 2 || seq_k >= 128)) {
         causal_attn_task_t task = {
             .out = out, .Q = Q, .K = K, .V = V,
