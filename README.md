@@ -1,6 +1,6 @@
 # Qwen3-ASR Pure C Implementation
 
-This is a C implementation of the inference pipeline for [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) speech-to-text models (both 0.6B and 1.7B). It has zero external dependencies beyond the C standard library and a BLAS implementation (Accelerate on macOS, OpenBLAS on Linux). Tokens stream to stdout as they are generated. The implementation runs at speed multiple of the file length even in very modest hardware, like low end Intel or AMD processor.
+This is a C implementation of the inference pipeline for [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) speech-to-text models (both 0.6B and 1.7B). It has zero external dependencies beyond the C standard library, a BLAS implementation (Accelerate on macOS, OpenBLAS on Linux) and Metal on ARM macOS. Tokens stream to stdout as they are generated. The implementation runs at speed multiple of the file length even in very modest hardware, like low end Intel or AMD processor.
 
 On Apple Silicon, `make mps` enables a Metal/MPS backend that offloads large matrix multiplications to the GPU via `MPSMatrixMultiplication`. Since Apple Silicon uses unified memory, there is no CPU↔GPU copy overhead, which makes this path meaningfully faster than CPU-only BLAS for encoder-heavy workloads.
 
@@ -270,6 +270,21 @@ To convert files to WAV format, just use ffmpeg:
     ffmpeg -i input.ogg output.wav
 
 There are two example WAV files under the `samples/` directory.
+
+### Reading Audio from the microphone (macOS)
+
+Compile the Swift utility with
+```bash
+swiftc mic2wav.swift
+```
+Now you can pipe the microphone input directly to the ASR engine, for example:
+```bash
+./mic2wav | ./qwen_asr -d qwen3-asr-0.6b --stream --stdin --prompt "Use punctuation"
+```
+
+**Notes:**
+- You may be prompted to select a microphone; audio transmission begins after you respond.
+- If `mic2wav` is in your PATH, you can run it with `mic2wav` from within any folder.
 
 ### C API
 

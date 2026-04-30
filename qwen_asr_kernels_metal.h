@@ -4,8 +4,8 @@
  * C-callable interface; safe to include from plain C translation units.
  * Implementation is in qwen_asr_kernels_metal.m (Objective-C + MPS).
  *
- * Phase 1: MPSMatrixMultiplication replaces large BLAS sgemm calls.
- * Phase 2 hook: qwen_asr_kernels.metal provides custom shader stubs.
+ * Currently MPSMatrixMultiplication replaces large BLAS sgemm calls.
+ * For possible future use qwen_asr_kernels.metal provides custom shader stubs.
  */
 
 #ifndef QWEN_ASR_KERNELS_METAL_H
