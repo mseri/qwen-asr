@@ -1,4 +1,5 @@
 *.o
+mic2wav
 qwen_asr
 venv/
 venv312/
